@@ -17,88 +17,93 @@ import (
 	"unsafe"
 )
 
-//export ApplyGrayscale
-func ApplyGrayscale(img *C.ImageData) *C.ImageData {
+func processImageSafely(img *C.ImageData, process func(r, g, b float64) (uint8, uint8, uint8)) *C.ImageData {
+	if img == nil || img.data == nil || img.width <= 0 || img.height <= 0 || img.channels <= 0 {
+		return nil
+	}
+
 	width := int(img.width)
 	height := int(img.height)
 	channels := int(img.channels)
-
 	size := width * height * channels
-	input := (*[1 << 30]uint8)(unsafe.Pointer(img.data))[:size:size]
 
+	if size <= 0 || size > (1<<30) {
+		return nil
+	}
+
+	// Allocate output buffer
 	output := (*C.uint8_t)(C.malloc(C.size_t(size)))
+	if output == nil {
+		return nil
+	}
+
+	// Create safe slices
+	inputSlice := (*[1 << 30]uint8)(unsafe.Pointer(img.data))[:size:size]
 	outputSlice := (*[1 << 30]uint8)(unsafe.Pointer(output))[:size:size]
 
+	// Process image
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
 			i := (y*width + x) * channels
-			r := float64(input[i])
-			g := float64(input[i+1])
-			b := float64(input[i+2])
+			if i+2 >= size {
+				continue
+			}
 
-			gray := uint8((r*0.299 + g*0.587 + b*0.114))
+			r := float64(inputSlice[i])
+			g := float64(inputSlice[i+1])
+			b := float64(inputSlice[i+2])
 
-			outputSlice[i] = gray
-			outputSlice[i+1] = gray
-			outputSlice[i+2] = gray
-			if channels == 4 {
-				outputSlice[i+3] = input[i+3] // preserve alpha
+			outputR, outputG, outputB := process(r, g, b)
+
+			outputSlice[i] = outputR
+			outputSlice[i+1] = outputG
+			outputSlice[i+2] = outputB
+
+			if channels == 4 && i+3 < size {
+				outputSlice[i+3] = inputSlice[i+3]
 			}
 		}
 	}
 
 	result := (*C.ImageData)(C.malloc(C.size_t(unsafe.Sizeof(C.ImageData{}))))
+	if result == nil {
+		C.free(unsafe.Pointer(output))
+		return nil
+	}
+
 	result.data = output
 	result.width = img.width
 	result.height = img.height
 	result.channels = img.channels
 	return result
+}
+
+//export ApplyGrayscale
+func ApplyGrayscale(img *C.ImageData) *C.ImageData {
+	return processImageSafely(img, func(r, g, b float64) (uint8, uint8, uint8) {
+		gray := uint8((r*0.299 + g*0.587 + b*0.114))
+		return gray, gray, gray
+	})
 }
 
 //export ApplySepia
 func ApplySepia(img *C.ImageData) *C.ImageData {
-	width := int(img.width)
-	height := int(img.height)
-	channels := int(img.channels)
-
-	size := width * height * channels
-	input := (*[1 << 30]uint8)(unsafe.Pointer(img.data))[:size:size]
-
-	output := (*C.uint8_t)(C.malloc(C.size_t(size)))
-	outputSlice := (*[1 << 30]uint8)(unsafe.Pointer(output))[:size:size]
-
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			i := (y*width + x) * channels
-			r := float64(input[i])
-			g := float64(input[i+1])
-			b := float64(input[i+2])
-
-			tr := math.Min(255, (r*0.393)+(g*0.769)+(b*0.189))
-			tg := math.Min(255, (r*0.349)+(g*0.686)+(b*0.168))
-			tb := math.Min(255, (r*0.272)+(g*0.534)+(b*0.131))
-
-			outputSlice[i] = uint8(tr)
-			outputSlice[i+1] = uint8(tg)
-			outputSlice[i+2] = uint8(tb)
-			if channels == 4 {
-				outputSlice[i+3] = input[i+3]
-			}
-		}
-	}
-
-	result := (*C.ImageData)(C.malloc(C.size_t(unsafe.Sizeof(C.ImageData{}))))
-	result.data = output
-	result.width = img.width
-	result.height = img.height
-	result.channels = img.channels
-	return result
+	return processImageSafely(img, func(r, g, b float64) (uint8, uint8, uint8) {
+		tr := uint8(math.Min(255, (r*0.393)+(g*0.769)+(b*0.189)))
+		tg := uint8(math.Min(255, (r*0.349)+(g*0.686)+(b*0.168)))
+		tb := uint8(math.Min(255, (r*0.272)+(g*0.534)+(b*0.131)))
+		return tr, tg, tb
+	})
 }
 
 //export FreeImageData
 func FreeImageData(img *C.ImageData) {
-	C.free(unsafe.Pointer(img.data))
-	C.free(unsafe.Pointer(img))
+	if img != nil {
+		if img.data != nil {
+			C.free(unsafe.Pointer(img.data))
+		}
+		C.free(unsafe.Pointer(img))
+	}
 }
 
 func main() {}

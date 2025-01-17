@@ -77,47 +77,78 @@ class _ImageProcessingPageState extends State<ImageProcessingPage> {
       });
     }
   }
+  
+Future<void> _processImage(bool isGrayscale) async {
+    try {
+      if (_originalImageBytes == null) return;
 
-  Future<void> _processImage(bool isGrayscale) async {
-    if (_originalImageBytes == null) return;
+      final decodedImage = img.decodeImage(_originalImageBytes!);
+      if (decodedImage == null) return;
 
-    final decodedImage = img.decodeImage(_originalImageBytes!);
-    if (decodedImage == null) return;
+      // Ensure image is in RGBA format
+      final rgbaImage = decodedImage.convert(numChannels: 4);
+      final pixels = rgbaImage.getBytes();
+      
+      // Allocate input data
+      final inputData = calloc<ImageData>();
+      final pixelPointer = calloc<Uint8>(pixels.length);
+      
+      try {
+        // Copy image data
+        final pixelList = pixelPointer.asTypedList(pixels.length);
+        for (var i = 0; i < pixels.length; i++) {
+          pixelList[i] = pixels[i];
+        }
 
-    final inputData = calloc<ImageData>();
-    final pixels = decodedImage.getBytes();
-    final pixelPointer = calloc<Uint8>(pixels.length);
-    pixelPointer.asTypedList(pixels.length).setAll(0, pixels);
+        // Setup input structure
+        inputData.ref.data = pixelPointer;
+        inputData.ref.width = rgbaImage.width;
+        inputData.ref.height = rgbaImage.height;
+        inputData.ref.channels = 4;
 
-    inputData.ref.data = pixelPointer;
-    inputData.ref.width = decodedImage.width;
-    inputData.ref.height = decodedImage.height;
-    inputData.ref.channels = 4; // RGBA
+        // Process image
+        final outputData = isGrayscale
+            ? _applyGrayscale(inputData)
+            : _applySepia(inputData);
 
-    final outputData = isGrayscale
-        ? _applyGrayscale(inputData)
-        : _applySepia(inputData);
+        if (outputData == nullptr) {
+          throw Exception('Image processing failed');
+        }
 
-    final outputBytes = outputData.ref.data.asTypedList(
-        outputData.ref.width * outputData.ref.height * outputData.ref.channels);
+        // Copy processed data
+        final outputLength = outputData.ref.width * 
+                           outputData.ref.height * 
+                           outputData.ref.channels;
+        final outputBytes = outputData.ref.data.asTypedList(outputLength);
 
-    final processedImage = img.Image.fromBytes(
-        width: outputData.ref.width,
-        height: outputData.ref.height,
-        bytes: outputBytes.buffer,
-        numChannels: outputData.ref.channels,
-    );
+        final processedImage = img.Image.fromBytes(
+          width: outputData.ref.width,
+          height: outputData.ref.height,
+          // bytes: Uint8List.fromList(outputBytes.toList()),
+          bytes: Uint8List.fromList(outputBytes.toList()).buffer,
+          numChannels: outputData.ref.channels,
+        );
 
-    setState(() {
-      _processedImageBytes = img.encodeJpg(processedImage);
-    });
+        setState(() {
+          _processedImageBytes = img.encodeJpg(processedImage);
+        });
 
-    // Cleanup
-    calloc.free(pixelPointer);
-    calloc.free(inputData);
-    _freeImageData(outputData);
-  }
-
+        // Cleanup
+        _freeImageData(outputData);
+      } finally {
+        calloc.free(pixelPointer);
+        calloc.free(inputData);
+      }
+    } catch (e, stackTrace) {
+      print('Error processing image: $e');
+      print('Stack trace: $stackTrace');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to process image: $e')),
+        );
+      }
+    }
+}
   @override
   Widget build(BuildContext context) {
     return Scaffold(
