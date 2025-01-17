@@ -22,6 +22,14 @@ typedef struct { const char *p; ptrdiff_t n; } _GoString_;
 #line 3 "calculator.go"
 
 #include <stdlib.h>
+#include <stdint.h>
+
+typedef struct {
+    uint8_t* data;
+    int32_t width;
+    int32_t height;
+    int32_t channels;
+} ImageData;
 
 #line 1 "cgo-generated-wrapper"
 
@@ -79,9 +87,9 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
-extern char* ReverseString(char* input);
-extern int CountWords(char* input);
-extern void Free(void* ptr);
+extern ImageData* ApplyGrayscale(ImageData* img);
+extern ImageData* ApplySepia(ImageData* img);
+extern void FreeImageData(ImageData* img);
 
 #ifdef __cplusplus
 }

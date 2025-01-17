@@ -1,21 +1,30 @@
 import 'dart:ffi';
 import 'dart:io';
-import 'package:flutter/material.dart';
+import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
+import 'package:flutter/material.dart';
+import 'package:image/image.dart' as img;
+import 'package:image_picker/image_picker.dart';
+
+// FFI structs
+base class ImageData extends Struct {
+  external Pointer<Uint8> data;
+  @Int32()
+  external int width;
+  @Int32()
+  external int height;
+  @Int32()
+  external int channels;
+}
 
 // FFI signatures
-typedef ReverseStringFunc = Pointer<Utf8> Function(Pointer<Utf8>);
-typedef ReverseString = Pointer<Utf8> Function(Pointer<Utf8>);
+typedef ApplyFilterFunc = Pointer<ImageData> Function(Pointer<ImageData>);
+typedef ApplyFilter = Pointer<ImageData> Function(Pointer<ImageData>);
 
-typedef CountWordsFunc = Int32 Function(Pointer<Utf8>);
-typedef CountWords = int Function(Pointer<Utf8>);
+typedef FreeImageDataFunc = Void Function(Pointer<ImageData>);
+typedef FreeImageData = void Function(Pointer<ImageData>);
 
-typedef FreeFunc = Void Function(Pointer<Void>);
-typedef Free = void Function(Pointer<Void>);
-
-void main() {
-  runApp(const MyApp());
-}
+void main() => runApp(const MyApp());
 
 class MyApp extends StatelessWidget {
   const MyApp({Key? key}) : super(key: key);
@@ -24,25 +33,27 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       theme: ThemeData(primarySwatch: Colors.blue),
-      home: MyHomePage(),
+      home: const ImageProcessingPage(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
+class ImageProcessingPage extends StatefulWidget {
+  const ImageProcessingPage({Key? key}) : super(key: key);
+
   @override
-  _MyHomePageState createState() => _MyHomePageState();
+  _ImageProcessingPageState createState() => _ImageProcessingPageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
+class _ImageProcessingPageState extends State<ImageProcessingPage> {
   late final DynamicLibrary _lib;
-  late final ReverseString _reverseString;
-  late final CountWords _countWords;
-  late final Free _free;
+  late final ApplyFilter _applyGrayscale;
+  late final ApplyFilter _applySepia;
+  late final FreeImageData _freeImageData;
   
-  final TextEditingController _controller = TextEditingController();
-  String _reversedText = '';
-  int _wordCount = 0;
+  Uint8List? _originalImageBytes;
+  Uint8List? _processedImageBytes;
+  final _picker = ImagePicker();
 
   @override
   void initState() {
@@ -51,61 +62,96 @@ class _MyHomePageState extends State<MyHomePage> {
         ? DynamicLibrary.open('libcalculator.so')
         : throw UnsupportedError('Unsupported platform');
 
-    _reverseString = _lib.lookupFunction<ReverseStringFunc, ReverseString>('ReverseString');
-    _countWords = _lib.lookupFunction<CountWordsFunc, CountWords>('CountWords');
-    _free = _lib.lookupFunction<FreeFunc, Free>('Free');
+    _applyGrayscale = _lib.lookupFunction<ApplyFilterFunc, ApplyFilter>('ApplyGrayscale');
+    _applySepia = _lib.lookupFunction<ApplyFilterFunc, ApplyFilter>('ApplySepia');
+    _freeImageData = _lib.lookupFunction<FreeImageDataFunc, FreeImageData>('FreeImageData');
   }
 
-  void _processText() {
-    final text = _controller.text;
-    final inputPtr = text.toNativeUtf8();
-    
-    try {
-      final resultPtr = _reverseString(inputPtr);
+  Future<void> _pickImage() async {
+    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
+    if (image != null) {
+      final bytes = await image.readAsBytes();
       setState(() {
-        _reversedText = resultPtr.toDartString();
-        _wordCount = _countWords(inputPtr);
+        _originalImageBytes = bytes;
+        _processedImageBytes = null;
       });
-      _free(resultPtr.cast());
-    } finally {
-      calloc.free(inputPtr);
     }
   }
 
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
+  Future<void> _processImage(bool isGrayscale) async {
+    if (_originalImageBytes == null) return;
+
+    final decodedImage = img.decodeImage(_originalImageBytes!);
+    if (decodedImage == null) return;
+
+    final inputData = calloc<ImageData>();
+    final pixels = decodedImage.getBytes();
+    final pixelPointer = calloc<Uint8>(pixels.length);
+    pixelPointer.asTypedList(pixels.length).setAll(0, pixels);
+
+    inputData.ref.data = pixelPointer;
+    inputData.ref.width = decodedImage.width;
+    inputData.ref.height = decodedImage.height;
+    inputData.ref.channels = 4; // RGBA
+
+    final outputData = isGrayscale
+        ? _applyGrayscale(inputData)
+        : _applySepia(inputData);
+
+    final outputBytes = outputData.ref.data.asTypedList(
+        outputData.ref.width * outputData.ref.height * outputData.ref.channels);
+
+    final processedImage = img.Image.fromBytes(
+        width: outputData.ref.width,
+        height: outputData.ref.height,
+        bytes: outputBytes.buffer,
+        numChannels: outputData.ref.channels,
+    );
+
+    setState(() {
+      _processedImageBytes = img.encodeJpg(processedImage);
+    });
+
+    // Cleanup
+    calloc.free(pixelPointer);
+    calloc.free(inputData);
+    _freeImageData(outputData);
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Flutter + Golang Text Processor'),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
+      appBar: AppBar(title: const Text('Image Processing with Go')),
+      body: SingleChildScrollView(
         child: Column(
           children: [
-            TextField(
-              controller: _controller,
-              decoration: InputDecoration(
-                labelText: 'Enter text',
-                border: OutlineInputBorder(),
+            if (_originalImageBytes != null) ...[
+              Image.memory(_originalImageBytes!),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  ElevatedButton(
+                    onPressed: () => _processImage(true),
+                    child: const Text('Grayscale'),
+                  ),
+                  ElevatedButton(
+                    onPressed: () => _processImage(false),
+                    child: const Text('Sepia'),
+                  ),
+                ],
               ),
-              maxLines: 3,
-            ),
-            SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: _processText,
-              child: Text('Process Text'),
-            ),
-            SizedBox(height: 16),
-            Text('Reversed text: $_reversedText'),
-            Text('Word count: $_wordCount'),
+            ],
+            if (_processedImageBytes != null) ...[
+              const SizedBox(height: 16),
+              Image.memory(_processedImageBytes!),
+            ],
           ],
         ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _pickImage,
+        child: const Icon(Icons.add_photo_alternate),
       ),
     );
   }
