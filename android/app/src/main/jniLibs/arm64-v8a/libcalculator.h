@@ -31,6 +31,13 @@ typedef struct {
     int32_t channels;
 } ImageData;
 
+typedef struct {
+    float brightness;
+    float contrast;
+    float saturation;
+    float hue;
+} FilterParams;
+
 #line 1 "cgo-generated-wrapper"
 
 
@@ -87,9 +94,8 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
-extern ImageData* ApplyGrayscale(ImageData* img);
-extern ImageData* ApplySepia(ImageData* img);
-extern void FreeImageData(ImageData* img);
+extern ImageData* ApplyAdvancedFilters(ImageData* img, FilterParams* params);
+extern ImageData* ApplyBlur(ImageData* img, int radius);
 
 #ifdef __cplusplus
 }

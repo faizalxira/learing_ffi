@@ -1,12 +1,21 @@
 import 'dart:ffi';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:flutter/material.dart';
-import 'package:image/image.dart' as img;
-import 'package:image_picker/image_picker.dart';
+import 'package:camera/camera.dart';
 
 // FFI structs
+base class FilterParams extends Struct {
+  @Float()
+  external double brightness;
+  @Float()
+  external double contrast;
+  @Float()
+  external double saturation;
+  @Float()
+  external double hue;
+}
+
 base class ImageData extends Struct {
   external Pointer<Uint8> data;
   @Int32()
@@ -18,28 +27,39 @@ base class ImageData extends Struct {
 }
 
 // FFI signatures
-typedef ApplyFilterFunc = Pointer<ImageData> Function(Pointer<ImageData>);
-typedef ApplyFilter = Pointer<ImageData> Function(Pointer<ImageData>);
+typedef ApplyAdvancedFiltersFunc = Pointer<ImageData> Function(
+    Pointer<ImageData> image, Pointer<FilterParams> params);
+typedef ApplyAdvancedFilters = Pointer<ImageData> Function(
+    Pointer<ImageData> image, Pointer<FilterParams> params);
 
-typedef FreeImageDataFunc = Void Function(Pointer<ImageData>);
-typedef FreeImageData = void Function(Pointer<ImageData>);
+typedef ApplyBlurFunc = Pointer<ImageData> Function(
+    Pointer<ImageData> image, Int32 radius);
+typedef ApplyBlur = Pointer<ImageData> Function(
+    Pointer<ImageData> image, int radius);
 
-void main() => runApp(const MyApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final cameras = await availableCameras();
+  runApp(MyApp(cameras: cameras));
+}
 
 class MyApp extends StatelessWidget {
-  const MyApp({Key? key}) : super(key: key);
+  final List<CameraDescription> cameras;
+  
+  const MyApp({Key? key, required this.cameras}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      theme: ThemeData(primarySwatch: Colors.blue),
-      home: const ImageProcessingPage(),
+      home: ImageProcessingPage(cameras: cameras),
     );
   }
 }
 
 class ImageProcessingPage extends StatefulWidget {
-  const ImageProcessingPage({Key? key}) : super(key: key);
+  final List<CameraDescription> cameras;
+
+  const ImageProcessingPage({Key? key, required this.cameras}) : super(key: key);
 
   @override
   _ImageProcessingPageState createState() => _ImageProcessingPageState();
@@ -47,143 +67,117 @@ class ImageProcessingPage extends StatefulWidget {
 
 class _ImageProcessingPageState extends State<ImageProcessingPage> {
   late final DynamicLibrary _lib;
-  late final ApplyFilter _applyGrayscale;
-  late final ApplyFilter _applySepia;
-  late final FreeImageData _freeImageData;
+  late final ApplyAdvancedFilters _applyAdvancedFilters;
+  late final ApplyBlur _applyBlur;
+  late CameraController? _controller;
   
-  Uint8List? _originalImageBytes;
-  Uint8List? _processedImageBytes;
-  final _picker = ImagePicker();
+  double _brightness = 1.0;
+  double _contrast = 1.0;
+  double _saturation = 1.0;
+  double _blurRadius = 0.0;
 
   @override
   void initState() {
     super.initState();
+    _initializeCamera();
+    _loadLibrary();
+  }
+
+  void _loadLibrary() {
     _lib = Platform.isAndroid
         ? DynamicLibrary.open('libcalculator.so')
         : throw UnsupportedError('Unsupported platform');
 
-    _applyGrayscale = _lib.lookupFunction<ApplyFilterFunc, ApplyFilter>('ApplyGrayscale');
-    _applySepia = _lib.lookupFunction<ApplyFilterFunc, ApplyFilter>('ApplySepia');
-    _freeImageData = _lib.lookupFunction<FreeImageDataFunc, FreeImageData>('FreeImageData');
+    _applyAdvancedFilters = _lib.lookupFunction<ApplyAdvancedFiltersFunc, ApplyAdvancedFilters>('ApplyAdvancedFilters');
+    _applyBlur = _lib.lookupFunction<ApplyBlurFunc, ApplyBlur>('ApplyBlur');
   }
 
-  Future<void> _pickImage() async {
-    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
-    if (image != null) {
-      final bytes = await image.readAsBytes();
-      setState(() {
-        _originalImageBytes = bytes;
-        _processedImageBytes = null;
-      });
-    }
+  Future<void> _initializeCamera() async {
+    _controller = CameraController(widget.cameras[0], ResolutionPreset.medium);
+    await _controller!.initialize();
+    setState(() {});
   }
-  
-Future<void> _processImage(bool isGrayscale) async {
-    try {
-      if (_originalImageBytes == null) return;
 
-      final decodedImage = img.decodeImage(_originalImageBytes!);
-      if (decodedImage == null) return;
+  Future<void> _processFrame(CameraImage image) async {
+    // Convert CameraImage to ImageData
+    final inputData = calloc<ImageData>();
+    // ... (implement conversion logic)
 
-      // Ensure image is in RGBA format
-      final rgbaImage = decodedImage.convert(numChannels: 4);
-      final pixels = rgbaImage.getBytes();
-      
-      // Allocate input data
-      final inputData = calloc<ImageData>();
-      final pixelPointer = calloc<Uint8>(pixels.length);
-      
-      try {
-        // Copy image data
-        final pixelList = pixelPointer.asTypedList(pixels.length);
-        for (var i = 0; i < pixels.length; i++) {
-          pixelList[i] = pixels[i];
-        }
+    // Apply filters
+    final params = calloc<FilterParams>();
+    params.ref.brightness = _brightness;
+    params.ref.contrast = _contrast;
+    params.ref.saturation = _saturation;
+    params.ref.hue = 0.0;
 
-        // Setup input structure
-        inputData.ref.data = pixelPointer;
-        inputData.ref.width = rgbaImage.width;
-        inputData.ref.height = rgbaImage.height;
-        inputData.ref.channels = 4;
+    final filteredImage = _applyAdvancedFilters(inputData, params);
+    final blurredImage = _applyBlur(filteredImage, _blurRadius.round());
 
-        // Process image
-        final outputData = isGrayscale
-            ? _applyGrayscale(inputData)
-            : _applySepia(inputData);
+    // Update UI with processed image
+    // ... (implement UI update logic)
 
-        if (outputData == nullptr) {
-          throw Exception('Image processing failed');
-        }
+    // Free memory
+    calloc.free(inputData);
+    calloc.free(params);
+  }
 
-        // Copy processed data
-        final outputLength = outputData.ref.width * 
-                           outputData.ref.height * 
-                           outputData.ref.channels;
-        final outputBytes = outputData.ref.data.asTypedList(outputLength);
-
-        final processedImage = img.Image.fromBytes(
-          width: outputData.ref.width,
-          height: outputData.ref.height,
-          // bytes: Uint8List.fromList(outputBytes.toList()),
-          bytes: Uint8List.fromList(outputBytes.toList()).buffer,
-          numChannels: outputData.ref.channels,
-        );
-
-        setState(() {
-          _processedImageBytes = img.encodeJpg(processedImage);
-        });
-
-        // Cleanup
-        _freeImageData(outputData);
-      } finally {
-        calloc.free(pixelPointer);
-        calloc.free(inputData);
-      }
-    } catch (e, stackTrace) {
-      print('Error processing image: $e');
-      print('Stack trace: $stackTrace');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to process image: $e')),
-        );
-      }
-    }
-}
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Image Processing with Go')),
-      body: SingleChildScrollView(
-        child: Column(
-          children: [
-            if (_originalImageBytes != null) ...[
-              Image.memory(_originalImageBytes!),
-              const SizedBox(height: 16),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  ElevatedButton(
-                    onPressed: () => _processImage(true),
-                    child: const Text('Grayscale'),
-                  ),
-                  ElevatedButton(
-                    onPressed: () => _processImage(false),
-                    child: const Text('Sepia'),
-                  ),
-                ],
-              ),
-            ],
-            if (_processedImageBytes != null) ...[
-              const SizedBox(height: 16),
-              Image.memory(_processedImageBytes!),
-            ],
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _pickImage,
-        child: const Icon(Icons.add_photo_alternate),
+      appBar: AppBar(title: const Text('Advanced Image Processing')),
+      body: Column(
+        children: [
+          if (_controller?.value.isInitialized ?? false)
+            CameraPreview(_controller!),
+          Expanded(
+            child: ListView(
+              children: [
+                _buildSlider('Brightness', _brightness, 0.0, 2.0),
+                _buildSlider('Contrast', _contrast, 0.0, 2.0),
+                _buildSlider('Saturation', _saturation, 0.0, 2.0),
+                _buildSlider('Blur', _blurRadius, 0.0, 10.0),
+              ],
+            ),
+          ),
+        ],
       ),
     );
+  }
+
+  Widget _buildSlider(String label, double value, double min, double max) {
+    return Column(
+      children: [
+        Text(label),
+        Slider(
+          value: value,
+          min: min,
+          max: max,
+          onChanged: (newValue) {
+            setState(() {
+              switch (label) {
+                case 'Brightness':
+                  _brightness = newValue;
+                  break;
+                case 'Contrast':
+                  _contrast = newValue;
+                  break;
+                case 'Saturation':
+                  _saturation = newValue;
+                  break;
+                case 'Blur':
+                  _blurRadius = newValue;
+                  break;
+              }
+            });
+          },
+        ),
+      ],
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
   }
 }
