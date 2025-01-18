@@ -3,149 +3,184 @@ package main
 /*
 #include <stdlib.h>
 #include <stdint.h>
-#include <math.h>
 
-typedef struct {
+typedef struct Vec2 {
     float x;
     float y;
-} Vector2;
+} Vec2;
 
-typedef struct {
-    Vector2 position;
-    Vector2 oldPosition;
-    Vector2 velocity;
+typedef struct FluidParticle {
+    Vec2 position;
+    Vec2 velocity;
+    Vec2 force;
+    float density;
+    float pressure;
     float mass;
-    int32_t isFixed;
-} RopePoint;
+} FluidParticle;
 
-typedef struct {
-    RopePoint* points;
-    int32_t pointCount;
-    float segmentLength;
-    float stiffness;
-    float damping;
-} RopeSystem;
-
-typedef struct {
-    float gravity;
-    float windForce;
-    float airResistance;
-} PhysicsParams;
+typedef struct FluidSystem {
+    FluidParticle* particles;
+    int32_t count;
+    float h;  // smoothing length
+    float k;  // gas constant
+    float mu; // viscosity
+    float rest_density;
+    float boundary_damping;
+    Vec2 gravity;
+    Vec2 bounds;
+} FluidSystem;
 */
 import "C"
+
 import (
 	"math"
 	"unsafe"
 )
 
-//export CreateRopeSystem
-func CreateRopeSystem(pointCount C.int32_t, length C.float) *C.RopeSystem {
-	rope := (*C.RopeSystem)(C.malloc(C.size_t(unsafe.Sizeof(C.RopeSystem{}))))
-	rope.points = (*C.RopePoint)(C.malloc(C.size_t(unsafe.Sizeof(C.RopePoint{}) * uintptr(pointCount))))
-	rope.pointCount = pointCount
-	rope.segmentLength = length / C.float(pointCount-1)
-	rope.stiffness = 0.5
-	rope.damping = 0.98
+const (
+	POLY6      = 315.0 / (64.0 * math.Pi)
+	SPIKY_GRAD = -45.0 / math.Pi
+	VISC_LAP   = 45.0 / math.Pi
+)
 
-	points := unsafe.Slice(rope.points, pointCount)
-	for i := range points {
-		points[i].position.x = C.float(i) * rope.segmentLength
-		points[i].position.y = 0
-		points[i].oldPosition = points[i].position
-		points[i].velocity.x = 0
-		points[i].velocity.y = 0
-		points[i].mass = 1.0
-		points[i].isFixed = 0
+//export CreateFluidSystem
+func CreateFluidSystem(count C.int32_t, width, height C.float) *C.FluidSystem {
+	system := (*C.FluidSystem)(C.malloc(C.size_t(unsafe.Sizeof(C.FluidSystem{}))))
+	system.particles = (*C.FluidParticle)(C.malloc(C.size_t(unsafe.Sizeof(C.FluidParticle{}) * uintptr(count))))
+	system.count = count
+	system.h = 16.0
+	system.k = 0.04
+	system.mu = 0.1
+	system.rest_density = 1000.0
+	system.boundary_damping = 0.5
+	system.gravity.x = 0
+	system.gravity.y = 9.81 * 100
+	system.bounds.x = width
+	system.bounds.y = height
+
+	// Initialize particles in a grid
+	particles := unsafe.Slice(system.particles, count)
+	particlesPerRow := int(math.Sqrt(float64(count)))
+	spacing := float64(system.h) / 2.0
+
+	for i := range particles {
+		row := i / particlesPerRow
+		col := i % particlesPerRow
+		particles[i].position.x = C.float(float64(col)*spacing + 50)
+		particles[i].position.y = C.float(float64(row)*spacing + 50)
+		particles[i].velocity.x = 0
+		particles[i].velocity.y = 0
+		particles[i].force.x = 0
+		particles[i].force.y = 0
+		particles[i].density = 0
+		particles[i].pressure = 0
+		particles[i].mass = 1.0
 	}
 
-	// Fix the first point
-	points[0].isFixed = 1
-
-	return rope
+	return system
 }
 
-//export UpdateRopePhysics
-func UpdateRopePhysics(rope *C.RopeSystem, params *C.PhysicsParams, deltaTime C.float) {
-	if rope == nil || rope.points == nil {
+//export UpdateFluidSystem
+func UpdateFluidSystem(system *C.FluidSystem, deltaTime C.float) {
+	if system == nil || system.particles == nil {
 		return
 	}
 
-	points := unsafe.Slice(rope.points, rope.pointCount)
-	dt := C.float(deltaTime)
+	particles := unsafe.Slice(system.particles, system.count)
+	h2 := float64(system.h * system.h)
 
-	// Verlet integration
-	for i := range points {
-		if points[i].isFixed == 1 {
-			continue
-		}
+	// Compute density and pressure
+	for i := range particles {
+		particles[i].density = 0
+		for j := range particles {
+			dx := float64(particles[j].position.x - particles[i].position.x)
+			dy := float64(particles[j].position.y - particles[i].position.y)
+			r2 := dx*dx + dy*dy
 
-		// Save current position
-		tempX := points[i].position.x
-		tempY := points[i].position.y
-
-		// Apply forces
-		points[i].velocity.x += params.windForce * dt
-		points[i].velocity.y += params.gravity * dt
-
-		// Apply air resistance
-		points[i].velocity.x *= (1.0 - params.airResistance)
-		points[i].velocity.y *= (1.0 - params.airResistance)
-
-		// Update position using Verlet integration
-		points[i].position.x += points[i].velocity.x * dt
-		points[i].position.y += points[i].velocity.y * dt
-
-		// Update old position
-		points[i].oldPosition.x = tempX
-		points[i].oldPosition.y = tempY
-	}
-
-	// Satisfy constraints (multiple iterations for stability)
-	for iter := 0; iter < 3; iter++ {
-		for i := 1; i < len(points); i++ {
-			p1 := &points[i-1]
-			p2 := &points[i]
-
-			// Calculate distance between points
-			dx := p2.position.x - p1.position.x
-			dy := p2.position.y - p1.position.y
-			distance := C.float(math.Sqrt(float64(dx*dx + dy*dy)))
-
-			// Calculate difference from desired length
-			diff := (distance - rope.segmentLength) / distance
-
-			// Apply correction based on stiffness
-			if p1.isFixed == 0 {
-				p1.position.x += dx * diff * rope.stiffness * 0.5
-				p1.position.y += dy * diff * rope.stiffness * 0.5
-			}
-			if p2.isFixed == 0 {
-				p2.position.x -= dx * diff * rope.stiffness * 0.5
-				p2.position.y -= dy * diff * rope.stiffness * 0.5
+			if r2 < h2 {
+				particles[i].density = C.float(float64(particles[i].density) +
+					float64(particles[j].mass)*POLY6*math.Pow(h2-r2, 3))
 			}
 		}
+		particles[i].pressure = C.float(float64(system.k) *
+			(float64(particles[i].density) - float64(system.rest_density)))
 	}
 
-	// Update velocities
-	for i := range points {
-		if points[i].isFixed == 1 {
-			continue
+	// Compute forces
+	for i := range particles {
+		fx, fy := 0.0, 0.0
+
+		for j := range particles {
+			if i == j {
+				continue
+			}
+
+			dx := float64(particles[j].position.x - particles[i].position.x)
+			dy := float64(particles[j].position.y - particles[i].position.y)
+			r := math.Sqrt(dx*dx + dy*dy)
+
+			if r < float64(system.h) {
+				// Pressure force
+				pressure := float64(particles[i].pressure+particles[j].pressure) /
+					(2.0 * float64(particles[j].density))
+				factor := SPIKY_GRAD * math.Pow(float64(system.h)-r, 2) * pressure
+				fx += dx / r * factor
+				fy += dy / r * factor
+
+				// Viscosity force
+				dvx := float64(particles[j].velocity.x - particles[i].velocity.x)
+				dvy := float64(particles[j].velocity.y - particles[i].velocity.y)
+				visc := float64(system.mu) * (float64(system.h) - r) /
+					float64(particles[j].density)
+				fx += dvx * visc * VISC_LAP
+				fy += dvy * visc * VISC_LAP
+			}
 		}
 
-		points[i].velocity.x = (points[i].position.x - points[i].oldPosition.x) / dt
-		points[i].velocity.y = (points[i].position.y - points[i].oldPosition.y) / dt
+		// Add gravity
+		fx += float64(system.gravity.x)
+		fy += float64(system.gravity.y)
 
-		// Apply damping
-		points[i].velocity.x *= rope.damping
-		points[i].velocity.y *= rope.damping
+		particles[i].force.x = C.float(fx)
+		particles[i].force.y = C.float(fy)
+	}
+
+	// Update positions
+	dt := float64(deltaTime)
+	for i := range particles {
+		// Update velocity
+		particles[i].velocity.x += C.float(float64(particles[i].force.x) * dt)
+		particles[i].velocity.y += C.float(float64(particles[i].force.y) * dt)
+
+		// Update position
+		particles[i].position.x += particles[i].velocity.x * deltaTime
+		particles[i].position.y += particles[i].velocity.y * deltaTime
+
+		// Boundary conditions
+		if particles[i].position.x < 0 {
+			particles[i].velocity.x *= -system.boundary_damping
+			particles[i].position.x = 0
+		}
+		if particles[i].position.x > system.bounds.x {
+			particles[i].velocity.x *= -system.boundary_damping
+			particles[i].position.x = system.bounds.x
+		}
+		if particles[i].position.y < 0 {
+			particles[i].velocity.y *= -system.boundary_damping
+			particles[i].position.y = 0
+		}
+		if particles[i].position.y > system.bounds.y {
+			particles[i].velocity.y *= -system.boundary_damping
+			particles[i].position.y = system.bounds.y
+		}
 	}
 }
 
-//export DestroyRopeSystem
-func DestroyRopeSystem(rope *C.RopeSystem) {
-	if rope != nil {
-		C.free(unsafe.Pointer(rope.points))
-		C.free(unsafe.Pointer(rope))
+//export DestroyFluidSystem
+func DestroyFluidSystem(system *C.FluidSystem) {
+	if system != nil {
+		C.free(unsafe.Pointer(system.particles))
+		C.free(unsafe.Pointer(system))
 	}
 }
 

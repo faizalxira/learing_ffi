@@ -23,34 +23,32 @@ typedef struct { const char *p; ptrdiff_t n; } _GoString_;
 
 #include <stdlib.h>
 #include <stdint.h>
-#include <math.h>
 
-typedef struct {
+typedef struct Vec2 {
     float x;
     float y;
-} Vector2;
+} Vec2;
 
-typedef struct {
-    Vector2 position;
-    Vector2 oldPosition;
-    Vector2 velocity;
+typedef struct FluidParticle {
+    Vec2 position;
+    Vec2 velocity;
+    Vec2 force;
+    float density;
+    float pressure;
     float mass;
-    int32_t isFixed;
-} RopePoint;
+} FluidParticle;
 
-typedef struct {
-    RopePoint* points;
-    int32_t pointCount;
-    float segmentLength;
-    float stiffness;
-    float damping;
-} RopeSystem;
-
-typedef struct {
-    float gravity;
-    float windForce;
-    float airResistance;
-} PhysicsParams;
+typedef struct FluidSystem {
+    FluidParticle* particles;
+    int32_t count;
+    float h;  // smoothing length
+    float k;  // gas constant
+    float mu; // viscosity
+    float rest_density;
+    float boundary_damping;
+    Vec2 gravity;
+    Vec2 bounds;
+} FluidSystem;
 
 #line 1 "cgo-generated-wrapper"
 
@@ -108,9 +106,9 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
-extern RopeSystem* CreateRopeSystem(int32_t pointCount, float length);
-extern void UpdateRopePhysics(RopeSystem* rope, PhysicsParams* params, float deltaTime);
-extern void DestroyRopeSystem(RopeSystem* rope);
+extern FluidSystem* CreateFluidSystem(int32_t count, float width, float height);
+extern void UpdateFluidSystem(FluidSystem* system, float deltaTime);
+extern void DestroyFluidSystem(FluidSystem* system);
 
 #ifdef __cplusplus
 }
