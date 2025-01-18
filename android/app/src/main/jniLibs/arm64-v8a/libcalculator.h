@@ -26,23 +26,32 @@ typedef struct { const char *p; ptrdiff_t n; } _GoString_;
 #include <math.h>
 
 typedef struct {
-    float* data;
-    int32_t length;
-} AudioBuffer;
+    float x;
+    float y;
+    float z;
+} Vector3;
 
 typedef struct {
-    float gain;
-    float echo_delay;
-    float echo_intensity;
-    float low_pass;
-    float high_pass;
-} AudioEffects;
+    Vector3 position;
+    Vector3 velocity;
+    Vector3 acceleration;
+    float mass;
+    float lifetime;
+    float age;
+} Particle;
 
 typedef struct {
-    float* frequencies;
-    float* magnitudes;
-    int32_t length;
-} SpectrumData;
+    Particle* particles;
+    int32_t count;
+} ParticleSystem;
+
+typedef struct {
+    float gravity;
+    float wind_x;
+    float wind_y;
+    float wind_z;
+    float damping;
+} PhysicsParams;
 
 #line 1 "cgo-generated-wrapper"
 
@@ -100,8 +109,9 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
-extern AudioBuffer* ProcessAudioBuffer(AudioBuffer* buffer, AudioEffects* effects);
-extern SpectrumData* AnalyzeSpectrum(AudioBuffer* buffer);
+extern ParticleSystem* InitializeParticleSystem(int32_t count);
+extern void UpdateParticleSystem(ParticleSystem* system, PhysicsParams* params, float deltaTime);
+extern void DeleteParticleSystem(ParticleSystem* system);
 
 #ifdef __cplusplus
 }

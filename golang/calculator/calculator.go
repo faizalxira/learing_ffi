@@ -6,143 +6,134 @@ package main
 #include <math.h>
 
 typedef struct {
-    float* data;
-    int32_t length;
-} AudioBuffer;
+    float x;
+    float y;
+    float z;
+} Vector3;
 
 typedef struct {
-    float gain;
-    float echo_delay;
-    float echo_intensity;
-    float low_pass;
-    float high_pass;
-} AudioEffects;
+    Vector3 position;
+    Vector3 velocity;
+    Vector3 acceleration;
+    float mass;
+    float lifetime;
+    float age;
+} Particle;
 
 typedef struct {
-    float* frequencies;
-    float* magnitudes;
-    int32_t length;
-} SpectrumData;
+    Particle* particles;
+    int32_t count;
+} ParticleSystem;
+
+typedef struct {
+    float gravity;
+    float wind_x;
+    float wind_y;
+    float wind_z;
+    float damping;
+} PhysicsParams;
 */
 import "C"
 import (
 	"math"
-	"math/cmplx"
+	"math/rand"
 	"unsafe"
 )
 
-//export ProcessAudioBuffer
-func ProcessAudioBuffer(buffer *C.AudioBuffer, effects *C.AudioEffects) *C.AudioBuffer {
-	if buffer == nil || buffer.data == nil {
-		return nil
+//export InitializeParticleSystem
+func InitializeParticleSystem(count C.int32_t) *C.ParticleSystem {
+	system := (*C.ParticleSystem)(C.malloc(C.size_t(unsafe.Sizeof(C.ParticleSystem{}))))
+	system.particles = (*C.Particle)(C.malloc(C.size_t(unsafe.Sizeof(C.Particle{}) * uintptr(count))))
+	system.count = count
+
+	particles := unsafe.Slice(system.particles, count)
+	for i := range particles {
+		initializeParticle(&particles[i], true)
 	}
 
-	length := int(buffer.length)
-	output := (*C.AudioBuffer)(C.malloc(C.size_t(unsafe.Sizeof(C.AudioBuffer{}))))
-	output.data = (*C.float)(C.malloc(C.size_t(unsafe.Sizeof(C.float(0)) * uintptr(length))))
-	output.length = buffer.length
+	return system
+}
 
-	inputSlice := (*[1 << 30]float32)(unsafe.Pointer(buffer.data))[:length:length]
-	outputSlice := (*[1 << 30]float32)(unsafe.Pointer(output.data))[:length:length]
-
-	// Apply gain
-	gain := float32(effects.gain)
-	for i := 0; i < length; i++ {
-		outputSlice[i] = inputSlice[i] * gain
+func initializeParticle(p *C.Particle, randomPosition bool) {
+	if randomPosition {
+		p.position.x = C.float(rand.Float64()*2 - 1) // -1 to 1
+		p.position.y = C.float(rand.Float64()*2 - 1)
+		p.position.z = C.float(rand.Float64()*2 - 1)
 	}
 
-	// Apply echo
-	if effects.echo_delay > 0 {
-		delaySamples := int(effects.echo_delay * 44100) // Assuming 44.1kHz sample rate
-		intensity := float32(effects.echo_intensity)
+	// Random initial velocity
+	speed := rand.Float64() * 2
+	angle := rand.Float64() * 2 * math.Pi
+	elevation := rand.Float64() * math.Pi
 
-		for i := delaySamples; i < length; i++ {
-			outputSlice[i] += inputSlice[i-delaySamples] * intensity
+	p.velocity.x = C.float(speed * math.Cos(angle) * math.Cos(elevation))
+	p.velocity.y = C.float(speed * math.Sin(elevation))
+	p.velocity.z = C.float(speed * math.Sin(angle) * math.Cos(elevation))
+
+	p.acceleration.x = 0
+	p.acceleration.y = 0
+	p.acceleration.z = 0
+
+	p.mass = C.float(rand.Float64()*0.5 + 0.5)
+	p.lifetime = C.float(rand.Float64()*2 + 3)
+	p.age = 0
+}
+
+//export UpdateParticleSystem
+func UpdateParticleSystem(system *C.ParticleSystem, params *C.PhysicsParams, deltaTime C.float) {
+	if system == nil || system.particles == nil {
+		return
+	}
+
+	particles := unsafe.Slice(system.particles, system.count)
+	dt := C.float(deltaTime) // Keep as C.float
+
+	for i := range particles {
+		p := &particles[i]
+
+		// Update age
+		p.age += deltaTime
+		if p.age >= p.lifetime {
+			initializeParticle(p, false)
+			p.position.y = -1 // Start from bottom
+			continue
+		}
+
+		// Apply forces
+		p.acceleration.x = params.wind_x / p.mass
+		p.acceleration.y = -params.gravity + params.wind_y/p.mass
+		p.acceleration.z = params.wind_z / p.mass
+
+		// Update velocity with acceleration (using C.float for all operations)
+		p.velocity.x += p.acceleration.x * dt
+		p.velocity.y += p.acceleration.y * dt
+		p.velocity.z += p.acceleration.z * dt
+
+		// Apply damping (convert damping to C.float)
+		damping := C.float(1.0 - float64(params.damping))
+		p.velocity.x *= damping
+		p.velocity.y *= damping
+		p.velocity.z *= damping
+
+		// Update position
+		p.position.x += p.velocity.x * dt
+		p.position.y += p.velocity.y * dt
+		p.position.z += p.velocity.z * dt
+
+		// Boundary conditions
+		if p.position.y < -1 {
+			p.position.y = -1
+			p.velocity.y = -p.velocity.y * C.float(0.5) // Convert 0.5 to C.float
 		}
 	}
-
-	// Apply low-pass filter
-	if effects.low_pass > 0 {
-		alpha := float32(effects.low_pass)
-		outputSlice[0] = inputSlice[0]
-		for i := 1; i < length; i++ {
-			outputSlice[i] = alpha*outputSlice[i-1] + (1-alpha)*inputSlice[i]
-		}
-	}
-
-	return output
 }
 
-//export AnalyzeSpectrum
-func AnalyzeSpectrum(buffer *C.AudioBuffer) *C.SpectrumData {
-	length := int(buffer.length)
-	fftSize := nextPowerOf2(length)
-
-	// Prepare FFT input
-	input := make([]complex128, fftSize)
-	inputSlice := (*[1 << 30]float32)(unsafe.Pointer(buffer.data))[:length:length]
-
-	// Apply Hanning window
-	for i := 0; i < length; i++ {
-		window := 0.5 * (1 - math.Cos(2*math.Pi*float64(i)/float64(length-1)))
-		input[i] = complex(float64(inputSlice[i])*window, 0)
+//export DeleteParticleSystem
+func DeleteParticleSystem(system *C.ParticleSystem) {
+	if system != nil {
+		C.free(unsafe.Pointer(system.particles))
+		C.free(unsafe.Pointer(system))
 	}
-
-	// Perform FFT
-	output := fft(input)
-
-	// Create spectrum data
-	spectrum := (*C.SpectrumData)(C.malloc(C.size_t(unsafe.Sizeof(C.SpectrumData{}))))
-	binCount := fftSize/2 + 1
-	spectrum.frequencies = (*C.float)(C.malloc(C.size_t(unsafe.Sizeof(C.float(0)) * uintptr(binCount))))
-	spectrum.magnitudes = (*C.float)(C.malloc(C.size_t(unsafe.Sizeof(C.float(0)) * uintptr(binCount))))
-	spectrum.length = C.int32_t(binCount)
-
-	freqSlice := (*[1 << 30]float32)(unsafe.Pointer(spectrum.frequencies))[:binCount:binCount]
-	magSlice := (*[1 << 30]float32)(unsafe.Pointer(spectrum.magnitudes))[:binCount:binCount]
-
-	// Calculate frequencies and magnitudes
-	for i := 0; i < binCount; i++ {
-		freqSlice[i] = float32(i) * 44100 / float32(fftSize) // Assuming 44.1kHz sample rate
-		magSlice[i] = float32(cmplx.Abs(output[i]))
-	}
-
-	return spectrum
-}
-
-func nextPowerOf2(n int) int {
-	p := 1
-	for p < n {
-		p *= 2
-	}
-	return p
-}
-
-func fft(input []complex128) []complex128 {
-	n := len(input)
-	if n <= 1 {
-		return input
-	}
-
-	even := make([]complex128, n/2)
-	odd := make([]complex128, n/2)
-	for i := 0; i < n/2; i++ {
-		even[i] = input[2*i]
-		odd[i] = input[2*i+1]
-	}
-
-	evenFFT := fft(even)
-	oddFFT := fft(odd)
-
-	result := make([]complex128, n)
-	for k := 0; k < n/2; k++ {
-		phase := complex(0, -2*math.Pi*float64(k)/float64(n))
-		t := cmplx.Exp(phase) * oddFFT[k]
-		result[k] = evenFFT[k] + t
-		result[k+n/2] = evenFFT[k] - t
-	}
-
-	return result
 }
 
 func main() {}
