@@ -8,131 +8,144 @@ package main
 typedef struct {
     float x;
     float y;
-    float z;
-} Vector3;
+} Vector2;
 
 typedef struct {
-    Vector3 position;
-    Vector3 velocity;
-    Vector3 acceleration;
+    Vector2 position;
+    Vector2 oldPosition;
+    Vector2 velocity;
     float mass;
-    float lifetime;
-    float age;
-} Particle;
+    int32_t isFixed;
+} RopePoint;
 
 typedef struct {
-    Particle* particles;
-    int32_t count;
-} ParticleSystem;
+    RopePoint* points;
+    int32_t pointCount;
+    float segmentLength;
+    float stiffness;
+    float damping;
+} RopeSystem;
 
 typedef struct {
     float gravity;
-    float wind_x;
-    float wind_y;
-    float wind_z;
-    float damping;
+    float windForce;
+    float airResistance;
 } PhysicsParams;
 */
 import "C"
 import (
 	"math"
-	"math/rand"
 	"unsafe"
 )
 
-//export InitializeParticleSystem
-func InitializeParticleSystem(count C.int32_t) *C.ParticleSystem {
-	system := (*C.ParticleSystem)(C.malloc(C.size_t(unsafe.Sizeof(C.ParticleSystem{}))))
-	system.particles = (*C.Particle)(C.malloc(C.size_t(unsafe.Sizeof(C.Particle{}) * uintptr(count))))
-	system.count = count
+//export CreateRopeSystem
+func CreateRopeSystem(pointCount C.int32_t, length C.float) *C.RopeSystem {
+	rope := (*C.RopeSystem)(C.malloc(C.size_t(unsafe.Sizeof(C.RopeSystem{}))))
+	rope.points = (*C.RopePoint)(C.malloc(C.size_t(unsafe.Sizeof(C.RopePoint{}) * uintptr(pointCount))))
+	rope.pointCount = pointCount
+	rope.segmentLength = length / C.float(pointCount-1)
+	rope.stiffness = 0.5
+	rope.damping = 0.98
 
-	particles := unsafe.Slice(system.particles, count)
-	for i := range particles {
-		initializeParticle(&particles[i], true)
+	points := unsafe.Slice(rope.points, pointCount)
+	for i := range points {
+		points[i].position.x = C.float(i) * rope.segmentLength
+		points[i].position.y = 0
+		points[i].oldPosition = points[i].position
+		points[i].velocity.x = 0
+		points[i].velocity.y = 0
+		points[i].mass = 1.0
+		points[i].isFixed = 0
 	}
 
-	return system
+	// Fix the first point
+	points[0].isFixed = 1
+
+	return rope
 }
 
-func initializeParticle(p *C.Particle, randomPosition bool) {
-	if randomPosition {
-		p.position.x = C.float(rand.Float64()*2 - 1) // -1 to 1
-		p.position.y = C.float(rand.Float64()*2 - 1)
-		p.position.z = C.float(rand.Float64()*2 - 1)
-	}
-
-	// Random initial velocity
-	speed := rand.Float64() * 2
-	angle := rand.Float64() * 2 * math.Pi
-	elevation := rand.Float64() * math.Pi
-
-	p.velocity.x = C.float(speed * math.Cos(angle) * math.Cos(elevation))
-	p.velocity.y = C.float(speed * math.Sin(elevation))
-	p.velocity.z = C.float(speed * math.Sin(angle) * math.Cos(elevation))
-
-	p.acceleration.x = 0
-	p.acceleration.y = 0
-	p.acceleration.z = 0
-
-	p.mass = C.float(rand.Float64()*0.5 + 0.5)
-	p.lifetime = C.float(rand.Float64()*2 + 3)
-	p.age = 0
-}
-
-//export UpdateParticleSystem
-func UpdateParticleSystem(system *C.ParticleSystem, params *C.PhysicsParams, deltaTime C.float) {
-	if system == nil || system.particles == nil {
+//export UpdateRopePhysics
+func UpdateRopePhysics(rope *C.RopeSystem, params *C.PhysicsParams, deltaTime C.float) {
+	if rope == nil || rope.points == nil {
 		return
 	}
 
-	particles := unsafe.Slice(system.particles, system.count)
-	dt := C.float(deltaTime) // Keep as C.float
+	points := unsafe.Slice(rope.points, rope.pointCount)
+	dt := C.float(deltaTime)
 
-	for i := range particles {
-		p := &particles[i]
-
-		// Update age
-		p.age += deltaTime
-		if p.age >= p.lifetime {
-			initializeParticle(p, false)
-			p.position.y = -1 // Start from bottom
+	// Verlet integration
+	for i := range points {
+		if points[i].isFixed == 1 {
 			continue
 		}
 
+		// Save current position
+		tempX := points[i].position.x
+		tempY := points[i].position.y
+
 		// Apply forces
-		p.acceleration.x = params.wind_x / p.mass
-		p.acceleration.y = -params.gravity + params.wind_y/p.mass
-		p.acceleration.z = params.wind_z / p.mass
+		points[i].velocity.x += params.windForce * dt
+		points[i].velocity.y += params.gravity * dt
 
-		// Update velocity with acceleration (using C.float for all operations)
-		p.velocity.x += p.acceleration.x * dt
-		p.velocity.y += p.acceleration.y * dt
-		p.velocity.z += p.acceleration.z * dt
+		// Apply air resistance
+		points[i].velocity.x *= (1.0 - params.airResistance)
+		points[i].velocity.y *= (1.0 - params.airResistance)
 
-		// Apply damping (convert damping to C.float)
-		damping := C.float(1.0 - float64(params.damping))
-		p.velocity.x *= damping
-		p.velocity.y *= damping
-		p.velocity.z *= damping
+		// Update position using Verlet integration
+		points[i].position.x += points[i].velocity.x * dt
+		points[i].position.y += points[i].velocity.y * dt
 
-		// Update position
-		p.position.x += p.velocity.x * dt
-		p.position.y += p.velocity.y * dt
-		p.position.z += p.velocity.z * dt
+		// Update old position
+		points[i].oldPosition.x = tempX
+		points[i].oldPosition.y = tempY
+	}
 
-		// Boundary conditions
-		if p.position.y < -1 {
-			p.position.y = -1
-			p.velocity.y = -p.velocity.y * C.float(0.5) // Convert 0.5 to C.float
+	// Satisfy constraints (multiple iterations for stability)
+	for iter := 0; iter < 3; iter++ {
+		for i := 1; i < len(points); i++ {
+			p1 := &points[i-1]
+			p2 := &points[i]
+
+			// Calculate distance between points
+			dx := p2.position.x - p1.position.x
+			dy := p2.position.y - p1.position.y
+			distance := C.float(math.Sqrt(float64(dx*dx + dy*dy)))
+
+			// Calculate difference from desired length
+			diff := (distance - rope.segmentLength) / distance
+
+			// Apply correction based on stiffness
+			if p1.isFixed == 0 {
+				p1.position.x += dx * diff * rope.stiffness * 0.5
+				p1.position.y += dy * diff * rope.stiffness * 0.5
+			}
+			if p2.isFixed == 0 {
+				p2.position.x -= dx * diff * rope.stiffness * 0.5
+				p2.position.y -= dy * diff * rope.stiffness * 0.5
+			}
 		}
+	}
+
+	// Update velocities
+	for i := range points {
+		if points[i].isFixed == 1 {
+			continue
+		}
+
+		points[i].velocity.x = (points[i].position.x - points[i].oldPosition.x) / dt
+		points[i].velocity.y = (points[i].position.y - points[i].oldPosition.y) / dt
+
+		// Apply damping
+		points[i].velocity.x *= rope.damping
+		points[i].velocity.y *= rope.damping
 	}
 }
 
-//export DeleteParticleSystem
-func DeleteParticleSystem(system *C.ParticleSystem) {
-	if system != nil {
-		C.free(unsafe.Pointer(system.particles))
-		C.free(unsafe.Pointer(system))
+//export DestroyRopeSystem
+func DestroyRopeSystem(rope *C.RopeSystem) {
+	if rope != nil {
+		C.free(unsafe.Pointer(rope.points))
+		C.free(unsafe.Pointer(rope))
 	}
 }
 

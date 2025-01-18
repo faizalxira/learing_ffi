@@ -28,29 +28,28 @@ typedef struct { const char *p; ptrdiff_t n; } _GoString_;
 typedef struct {
     float x;
     float y;
-    float z;
-} Vector3;
+} Vector2;
 
 typedef struct {
-    Vector3 position;
-    Vector3 velocity;
-    Vector3 acceleration;
+    Vector2 position;
+    Vector2 oldPosition;
+    Vector2 velocity;
     float mass;
-    float lifetime;
-    float age;
-} Particle;
+    int32_t isFixed;
+} RopePoint;
 
 typedef struct {
-    Particle* particles;
-    int32_t count;
-} ParticleSystem;
+    RopePoint* points;
+    int32_t pointCount;
+    float segmentLength;
+    float stiffness;
+    float damping;
+} RopeSystem;
 
 typedef struct {
     float gravity;
-    float wind_x;
-    float wind_y;
-    float wind_z;
-    float damping;
+    float windForce;
+    float airResistance;
 } PhysicsParams;
 
 #line 1 "cgo-generated-wrapper"
@@ -109,9 +108,9 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
-extern ParticleSystem* InitializeParticleSystem(int32_t count);
-extern void UpdateParticleSystem(ParticleSystem* system, PhysicsParams* params, float deltaTime);
-extern void DeleteParticleSystem(ParticleSystem* system);
+extern RopeSystem* CreateRopeSystem(int32_t pointCount, float length);
+extern void UpdateRopePhysics(RopeSystem* rope, PhysicsParams* params, float deltaTime);
+extern void DestroyRopeSystem(RopeSystem* rope);
 
 #ifdef __cplusplus
 }
