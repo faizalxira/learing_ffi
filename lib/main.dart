@@ -1,86 +1,91 @@
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:flutter/material.dart';
-import 'package:camera/camera.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_audio_capture/flutter_audio_capture.dart';
+import 'package:fl_chart/fl_chart.dart';
 
-// FFI structs
-base class FilterParams extends Struct {
-  @Float()
-  external double brightness;
-  @Float()
-  external double contrast;
-  @Float()
-  external double saturation;
-  @Float()
-  external double hue;
+base class AudioBuffer extends Struct {
+  external Pointer<Float> data;
+  @Int32()
+  external int length;
 }
 
-base class ImageData extends Struct {
-  external Pointer<Uint8> data;
-  @Int32()
-  external int width;
-  @Int32()
-  external int height;
-  @Int32()
-  external int channels;
+base class AudioEffects extends Struct {
+  @Float()
+  external double gain;
+  @Float()
+  external double echoDelay;
+  @Float()
+  external double echoIntensity;
+  @Float()
+  external double lowPass;
+  @Float()
+  external double highPass;
 }
 
-// FFI signatures
-typedef ApplyAdvancedFiltersFunc = Pointer<ImageData> Function(
-    Pointer<ImageData> image, Pointer<FilterParams> params);
-typedef ApplyAdvancedFilters = Pointer<ImageData> Function(
-    Pointer<ImageData> image, Pointer<FilterParams> params);
+base class SpectrumData extends Struct {
+  external Pointer<Float> frequencies;
+  external Pointer<Float> magnitudes;
+  @Int32()
+  external int length;
+}
 
-typedef ApplyBlurFunc = Pointer<ImageData> Function(
-    Pointer<ImageData> image, Int32 radius);
-typedef ApplyBlur = Pointer<ImageData> Function(
-    Pointer<ImageData> image, int radius);
+typedef ProcessAudioBufferFunc = Pointer<AudioBuffer> Function(
+    Pointer<AudioBuffer> buffer, Pointer<AudioEffects> effects);
+typedef ProcessAudioBuffer = Pointer<AudioBuffer> Function(
+    Pointer<AudioBuffer> buffer, Pointer<AudioEffects> effects);
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  final cameras = await availableCameras();
-  runApp(MyApp(cameras: cameras));
+typedef AnalyzeSpectrumFunc = Pointer<SpectrumData> Function(
+    Pointer<AudioBuffer> buffer);
+typedef AnalyzeSpectrum = Pointer<SpectrumData> Function(
+    Pointer<AudioBuffer> buffer);
+
+void main() {
+  runApp(const MyApp());
 }
 
 class MyApp extends StatelessWidget {
-  final List<CameraDescription> cameras;
-  
-  const MyApp({Key? key, required this.cameras}) : super(key: key);
+  const MyApp({Key? key}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      home: ImageProcessingPage(cameras: cameras),
+      home: AudioProcessingPage(),
     );
   }
 }
 
-class ImageProcessingPage extends StatefulWidget {
-  final List<CameraDescription> cameras;
-
-  const ImageProcessingPage({Key? key, required this.cameras}) : super(key: key);
-
+class AudioProcessingPage extends StatefulWidget {
   @override
-  _ImageProcessingPageState createState() => _ImageProcessingPageState();
+  _AudioProcessingPageState createState() => _AudioProcessingPageState();
 }
 
-class _ImageProcessingPageState extends State<ImageProcessingPage> {
+class _AudioProcessingPageState extends State<AudioProcessingPage> {
   late final DynamicLibrary _lib;
-  late final ApplyAdvancedFilters _applyAdvancedFilters;
-  late final ApplyBlur _applyBlur;
-  late CameraController? _controller;
+  late final ProcessAudioBuffer _processAudioBuffer;
+  late final AnalyzeSpectrum _analyzeSpectrum;
+  final _audioCapture = FlutterAudioCapture();
   
-  double _brightness = 1.0;
-  double _contrast = 1.0;
-  double _saturation = 1.0;
-  double _blurRadius = 0.0;
+  bool _isRecording = false;
+  double _gain = 1.0;
+  double _echoDelay = 0.0;
+  double _echoIntensity = 0.0;
+  double _lowPass = 0.0;
+  
+  List<FlSpot> _spectrumPoints = [];
 
   @override
   void initState() {
     super.initState();
-    _initializeCamera();
     _loadLibrary();
+    _requestPermissions();
+  }
+
+  Future<void> _requestPermissions() async {
+    await Permission.microphone.request();
   }
 
   void _loadLibrary() {
@@ -88,58 +93,123 @@ class _ImageProcessingPageState extends State<ImageProcessingPage> {
         ? DynamicLibrary.open('libcalculator.so')
         : throw UnsupportedError('Unsupported platform');
 
-    _applyAdvancedFilters = _lib.lookupFunction<ApplyAdvancedFiltersFunc, ApplyAdvancedFilters>('ApplyAdvancedFilters');
-    _applyBlur = _lib.lookupFunction<ApplyBlurFunc, ApplyBlur>('ApplyBlur');
+    _processAudioBuffer = _lib
+        .lookupFunction<ProcessAudioBufferFunc, ProcessAudioBuffer>(
+            'ProcessAudioBuffer');
+    _analyzeSpectrum = _lib
+        .lookupFunction<AnalyzeSpectrumFunc, AnalyzeSpectrum>(
+            'AnalyzeSpectrum');
   }
 
-  Future<void> _initializeCamera() async {
-    _controller = CameraController(widget.cameras[0], ResolutionPreset.medium);
-    await _controller!.initialize();
-    setState(() {});
+  Future<void> _toggleRecording() async {
+    if (_isRecording) {
+      await _audioCapture.stop();
+    } else {
+      await _audioCapture.start(_onAudioData, (){});
+    }
+    setState(() {
+      _isRecording = !_isRecording;
+    });
   }
 
-  Future<void> _processFrame(CameraImage image) async {
-    // Convert CameraImage to ImageData
-    final inputData = calloc<ImageData>();
-    // ... (implement conversion logic)
+  void _onAudioData(dynamic data) {
+    if (data is List<double>) {
+      final buffer = _createAudioBuffer(data);
+      final effects = _createAudioEffects();
 
-    // Apply filters
-    final params = calloc<FilterParams>();
-    params.ref.brightness = _brightness;
-    params.ref.contrast = _contrast;
-    params.ref.saturation = _saturation;
-    params.ref.hue = 0.0;
+      try {
+        // Process audio
+        final processedBuffer = _processAudioBuffer(buffer, effects);
+        
+        // Analyze spectrum
+        final spectrum = _analyzeSpectrum(processedBuffer);
+        
+        // Update spectrum visualization
+        if (mounted) {
+          setState(() {
+            _updateSpectrumVisualization(spectrum);
+          });
+        }
+      } finally {
+        calloc.free(buffer);
+        calloc.free(effects);
+      }
+    }
+  }
 
-    final filteredImage = _applyAdvancedFilters(inputData, params);
-    final blurredImage = _applyBlur(filteredImage, _blurRadius.round());
+  Pointer<AudioBuffer> _createAudioBuffer(List<double> data) {
+    final buffer = calloc<AudioBuffer>();
+    buffer.ref.length = data.length;
+    buffer.ref.data = calloc<Float>(data.length);
+    
+    final floatData = buffer.ref.data.asTypedList(data.length);
+    for (var i = 0; i < data.length; i++) {
+      floatData[i] = data[i].toDouble();
+    }
+    
+    return buffer;
+  }
 
-    // Update UI with processed image
-    // ... (implement UI update logic)
+  Pointer<AudioEffects> _createAudioEffects() {
+    final effects = calloc<AudioEffects>();
+    effects.ref.gain = _gain;
+    effects.ref.echoDelay = _echoDelay;
+    effects.ref.echoIntensity = _echoIntensity;
+    effects.ref.lowPass = _lowPass;
+    effects.ref.highPass = 0.0;
+    return effects;
+  }
 
-    // Free memory
-    calloc.free(inputData);
-    calloc.free(params);
+  void _updateSpectrumVisualization(Pointer<SpectrumData> spectrum) {
+    final length = spectrum.ref.length;
+    final frequencies = spectrum.ref.frequencies.asTypedList(length);
+    final magnitudes = spectrum.ref.magnitudes.asTypedList(length);
+
+    _spectrumPoints = List.generate(length, (i) {
+      return FlSpot(frequencies[i], magnitudes[i]);
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Advanced Image Processing')),
+      appBar: AppBar(title: const Text('Audio Processing')),
       body: Column(
         children: [
-          if (_controller?.value.isInitialized ?? false)
-            CameraPreview(_controller!),
+          Expanded(
+            child: LineChart(
+              LineChartData(
+                lineBarsData: [
+                  LineChartBarData(spots: _spectrumPoints),
+                ],
+                titlesData: FlTitlesData(
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      getTitlesWidget: (value, meta) {
+                        return Text('${(value/1000).toStringAsFixed(1)}kHz');
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
           Expanded(
             child: ListView(
               children: [
-                _buildSlider('Brightness', _brightness, 0.0, 2.0),
-                _buildSlider('Contrast', _contrast, 0.0, 2.0),
-                _buildSlider('Saturation', _saturation, 0.0, 2.0),
-                _buildSlider('Blur', _blurRadius, 0.0, 10.0),
+                _buildSlider('Gain', _gain, 0.0, 2.0),
+                _buildSlider('Echo Delay', _echoDelay, 0.0, 1.0),
+                _buildSlider('Echo Intensity', _echoIntensity, 0.0, 1.0),
+                _buildSlider('Low Pass Filter', _lowPass, 0.0, 1.0),
               ],
             ),
           ),
         ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _toggleRecording,
+        child: Icon(_isRecording ? Icons.stop : Icons.mic),
       ),
     );
   }
@@ -155,17 +225,17 @@ class _ImageProcessingPageState extends State<ImageProcessingPage> {
           onChanged: (newValue) {
             setState(() {
               switch (label) {
-                case 'Brightness':
-                  _brightness = newValue;
+                case 'Gain':
+                  _gain = newValue;
                   break;
-                case 'Contrast':
-                  _contrast = newValue;
+                case 'Echo Delay':
+                  _echoDelay = newValue;
                   break;
-                case 'Saturation':
-                  _saturation = newValue;
+                case 'Echo Intensity':
+                  _echoIntensity = newValue;
                   break;
-                case 'Blur':
-                  _blurRadius = newValue;
+                case 'Low Pass Filter':
+                  _lowPass = newValue;
                   break;
               }
             });
@@ -177,7 +247,7 @@ class _ImageProcessingPageState extends State<ImageProcessingPage> {
 
   @override
   void dispose() {
-    _controller?.dispose();
+    _audioCapture.stop();
     super.dispose();
   }
 }

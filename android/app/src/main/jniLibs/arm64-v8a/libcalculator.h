@@ -23,20 +23,26 @@ typedef struct { const char *p; ptrdiff_t n; } _GoString_;
 
 #include <stdlib.h>
 #include <stdint.h>
+#include <math.h>
 
 typedef struct {
-    uint8_t* data;
-    int32_t width;
-    int32_t height;
-    int32_t channels;
-} ImageData;
+    float* data;
+    int32_t length;
+} AudioBuffer;
 
 typedef struct {
-    float brightness;
-    float contrast;
-    float saturation;
-    float hue;
-} FilterParams;
+    float gain;
+    float echo_delay;
+    float echo_intensity;
+    float low_pass;
+    float high_pass;
+} AudioEffects;
+
+typedef struct {
+    float* frequencies;
+    float* magnitudes;
+    int32_t length;
+} SpectrumData;
 
 #line 1 "cgo-generated-wrapper"
 
@@ -94,8 +100,8 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
-extern ImageData* ApplyAdvancedFilters(ImageData* img, FilterParams* params);
-extern ImageData* ApplyBlur(ImageData* img, int radius);
+extern AudioBuffer* ProcessAudioBuffer(AudioBuffer* buffer, AudioEffects* effects);
+extern SpectrumData* AnalyzeSpectrum(AudioBuffer* buffer);
 
 #ifdef __cplusplus
 }

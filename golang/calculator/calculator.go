@@ -3,149 +3,146 @@ package main
 /*
 #include <stdlib.h>
 #include <stdint.h>
+#include <math.h>
 
 typedef struct {
-    uint8_t* data;
-    int32_t width;
-    int32_t height;
-    int32_t channels;
-} ImageData;
+    float* data;
+    int32_t length;
+} AudioBuffer;
 
 typedef struct {
-    float brightness;
-    float contrast;
-    float saturation;
-    float hue;
-} FilterParams;
+    float gain;
+    float echo_delay;
+    float echo_intensity;
+    float low_pass;
+    float high_pass;
+} AudioEffects;
+
+typedef struct {
+    float* frequencies;
+    float* magnitudes;
+    int32_t length;
+} SpectrumData;
 */
 import "C"
 import (
 	"math"
+	"math/cmplx"
 	"unsafe"
 )
 
-func processImageSafely(img *C.ImageData, processor func(r, g, b float64) (uint8, uint8, uint8)) *C.ImageData {
-	if img == nil || img.data == nil {
+//export ProcessAudioBuffer
+func ProcessAudioBuffer(buffer *C.AudioBuffer, effects *C.AudioEffects) *C.AudioBuffer {
+	if buffer == nil || buffer.data == nil {
 		return nil
 	}
 
-	width := int(img.width)
-	height := int(img.height)
-	channels := int(img.channels)
+	length := int(buffer.length)
+	output := (*C.AudioBuffer)(C.malloc(C.size_t(unsafe.Sizeof(C.AudioBuffer{}))))
+	output.data = (*C.float)(C.malloc(C.size_t(unsafe.Sizeof(C.float(0)) * uintptr(length))))
+	output.length = buffer.length
 
-	// Create output image
-	output := (*C.ImageData)(C.malloc(C.size_t(unsafe.Sizeof(C.ImageData{}))))
-	output.data = (*C.uint8_t)(C.malloc(C.size_t(width * height * channels)))
-	output.width = img.width
-	output.height = img.height
-	output.channels = img.channels
+	inputSlice := (*[1 << 30]float32)(unsafe.Pointer(buffer.data))[:length:length]
+	outputSlice := (*[1 << 30]float32)(unsafe.Pointer(output.data))[:length:length]
 
-	// Create Go slices from C arrays
-	inputSlice := (*[1 << 30]uint8)(unsafe.Pointer(img.data))[: width*height*channels : width*height*channels]
-	outputSlice := (*[1 << 30]uint8)(unsafe.Pointer(output.data))[: width*height*channels : width*height*channels]
+	// Apply gain
+	gain := float32(effects.gain)
+	for i := 0; i < length; i++ {
+		outputSlice[i] = inputSlice[i] * gain
+	}
 
-	// Process each pixel
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			i := (y*width + x) * channels
+	// Apply echo
+	if effects.echo_delay > 0 {
+		delaySamples := int(effects.echo_delay * 44100) // Assuming 44.1kHz sample rate
+		intensity := float32(effects.echo_intensity)
 
-			r := float64(inputSlice[i])
-			g := float64(inputSlice[i+1])
-			b := float64(inputSlice[i+2])
+		for i := delaySamples; i < length; i++ {
+			outputSlice[i] += inputSlice[i-delaySamples] * intensity
+		}
+	}
 
-			newR, newG, newB := processor(r, g, b)
-
-			outputSlice[i] = newR
-			outputSlice[i+1] = newG
-			outputSlice[i+2] = newB
-			if channels == 4 {
-				outputSlice[i+3] = inputSlice[i+3] // Preserve alpha channel
-			}
+	// Apply low-pass filter
+	if effects.low_pass > 0 {
+		alpha := float32(effects.low_pass)
+		outputSlice[0] = inputSlice[0]
+		for i := 1; i < length; i++ {
+			outputSlice[i] = alpha*outputSlice[i-1] + (1-alpha)*inputSlice[i]
 		}
 	}
 
 	return output
 }
 
-//export ApplyAdvancedFilters
-func ApplyAdvancedFilters(img *C.ImageData, params *C.FilterParams) *C.ImageData {
-	return processImageSafely(img, func(r, g, b float64) (uint8, uint8, uint8) {
-		// Apply brightness
-		r *= float64(params.brightness)
-		g *= float64(params.brightness)
-		b *= float64(params.brightness)
+//export AnalyzeSpectrum
+func AnalyzeSpectrum(buffer *C.AudioBuffer) *C.SpectrumData {
+	length := int(buffer.length)
+	fftSize := nextPowerOf2(length)
 
-		// Apply contrast
-		factor := (259 * (float64(params.contrast)*100 + 255)) / (255 * (259 - float64(params.contrast)*100))
-		r = factor*(r-128) + 128
-		g = factor*(g-128) + 128
-		b = factor*(b-128) + 128
+	// Prepare FFT input
+	input := make([]complex128, fftSize)
+	inputSlice := (*[1 << 30]float32)(unsafe.Pointer(buffer.data))[:length:length]
 
-		// Apply saturation
-		gray := (r + g + b) / 3
-		r = gray + float64(params.saturation)*(r-gray)
-		g = gray + float64(params.saturation)*(g-gray)
-		b = gray + float64(params.saturation)*(b-gray)
+	// Apply Hanning window
+	for i := 0; i < length; i++ {
+		window := 0.5 * (1 - math.Cos(2*math.Pi*float64(i)/float64(length-1)))
+		input[i] = complex(float64(inputSlice[i])*window, 0)
+	}
 
-		// Clamp values
-		return uint8(math.Min(255, math.Max(0, r))),
-			uint8(math.Min(255, math.Max(0, g))),
-			uint8(math.Min(255, math.Max(0, b)))
-	})
+	// Perform FFT
+	output := fft(input)
+
+	// Create spectrum data
+	spectrum := (*C.SpectrumData)(C.malloc(C.size_t(unsafe.Sizeof(C.SpectrumData{}))))
+	binCount := fftSize/2 + 1
+	spectrum.frequencies = (*C.float)(C.malloc(C.size_t(unsafe.Sizeof(C.float(0)) * uintptr(binCount))))
+	spectrum.magnitudes = (*C.float)(C.malloc(C.size_t(unsafe.Sizeof(C.float(0)) * uintptr(binCount))))
+	spectrum.length = C.int32_t(binCount)
+
+	freqSlice := (*[1 << 30]float32)(unsafe.Pointer(spectrum.frequencies))[:binCount:binCount]
+	magSlice := (*[1 << 30]float32)(unsafe.Pointer(spectrum.magnitudes))[:binCount:binCount]
+
+	// Calculate frequencies and magnitudes
+	for i := 0; i < binCount; i++ {
+		freqSlice[i] = float32(i) * 44100 / float32(fftSize) // Assuming 44.1kHz sample rate
+		magSlice[i] = float32(cmplx.Abs(output[i]))
+	}
+
+	return spectrum
 }
 
-//export ApplyBlur
-func ApplyBlur(img *C.ImageData, radius C.int) *C.ImageData {
-	if img == nil || img.data == nil {
-		return nil
+func nextPowerOf2(n int) int {
+	p := 1
+	for p < n {
+		p *= 2
+	}
+	return p
+}
+
+func fft(input []complex128) []complex128 {
+	n := len(input)
+	if n <= 1 {
+		return input
 	}
 
-	width := int(img.width)
-	height := int(img.height)
-	channels := int(img.channels)
-	r := int(radius)
-
-	output := (*C.ImageData)(C.malloc(C.size_t(unsafe.Sizeof(C.ImageData{}))))
-	output.data = (*C.uint8_t)(C.malloc(C.size_t(width * height * channels)))
-	output.width = img.width
-	output.height = img.height
-	output.channels = img.channels
-
-	inputSlice := (*[1 << 30]uint8)(unsafe.Pointer(img.data))[: width*height*channels : width*height*channels]
-	outputSlice := (*[1 << 30]uint8)(unsafe.Pointer(output.data))[: width*height*channels : width*height*channels]
-
-	// Box blur implementation
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			var sumR, sumG, sumB float64
-			count := 0
-
-			for dy := -r; dy <= r; dy++ {
-				for dx := -r; dx <= r; dx++ {
-					nx := x + dx
-					ny := y + dy
-
-					if nx >= 0 && nx < width && ny >= 0 && ny < height {
-						idx := (ny*width + nx) * channels
-						sumR += float64(inputSlice[idx])
-						sumG += float64(inputSlice[idx+1])
-						sumB += float64(inputSlice[idx+2])
-						count++
-					}
-				}
-			}
-
-			idx := (y*width + x) * channels
-			outputSlice[idx] = uint8(sumR / float64(count))
-			outputSlice[idx+1] = uint8(sumG / float64(count))
-			outputSlice[idx+2] = uint8(sumB / float64(count))
-			if channels == 4 {
-				outputSlice[idx+3] = inputSlice[idx+3]
-			}
-		}
+	even := make([]complex128, n/2)
+	odd := make([]complex128, n/2)
+	for i := 0; i < n/2; i++ {
+		even[i] = input[2*i]
+		odd[i] = input[2*i+1]
 	}
 
-	return output
+	evenFFT := fft(even)
+	oddFFT := fft(odd)
+
+	result := make([]complex128, n)
+	for k := 0; k < n/2; k++ {
+		phase := complex(0, -2*math.Pi*float64(k)/float64(n))
+		t := cmplx.Exp(phase) * oddFFT[k]
+		result[k] = evenFFT[k] + t
+		result[k+n/2] = evenFFT[k] - t
+	}
+
+	return result
 }
 
 func main() {}
